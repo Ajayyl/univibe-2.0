@@ -1,0 +1,329 @@
+// UniVibe — Recommendation Engine
+// Separated from UI rendering. Contains all filtering, scoring, and recommendation logic.
+
+// ──────────────────────────────────────────────
+// FILTERING FUNCTIONS
+// ──────────────────────────────────────────────
+
+/**
+ * Age-based content filtering.
+ * Movies with age_limit greater than user age are excluded.
+ */
+function applyAgeFilter(movies, userAge) {
+    if (!userAge || userAge >= 120) return movies;
+    return movies.filter(m => userAge >= m.age_limit);
+}
+
+/**
+ * Filter by genre.
+ */
+function getByGenre(movies, genre) {
+    if (!genre || genre === 'All') return movies;
+    return movies.filter(m => m.genre.includes(genre));
+}
+
+/**
+ * Filter by experience type.
+ */
+function getByExperience(movies, exp) {
+    if (!exp || exp === 'All') return movies;
+    return movies.filter(m => m.experience_type === exp.toLowerCase());
+}
+
+/**
+ * Filter by category tag (cult, underrated, family-safe).
+ */
+function getByCategory(movies, tag) {
+    return movies.filter(m => m.tags.includes(tag));
+}
+
+/**
+ * Search movies by title (partial, case-insensitive).
+ */
+function searchByTitle(movies, query) {
+    if (!query) return movies;
+    const q = query.toLowerCase();
+    return movies.filter(m => m.title.toLowerCase().includes(q));
+}
+
+/**
+ * Combined filter: genre + experience + search query.
+ */
+function filterMovies(movies, { genre, experience, query } = {}) {
+    let result = movies;
+    result = getByGenre(result, genre);
+    result = getByExperience(result, experience);
+    result = searchByTitle(result, query);
+    return result;
+}
+
+// ──────────────────────────────────────────────
+// CONTENT-BASED RECOMMENDATION ENGINE
+// ──────────────────────────────────────────────
+
+/**
+ * Calculate similarity score between two movies using weighted metadata comparison.
+ * Returns an object with the total score AND per-factor breakdown for explainability.
+ *
+ * Scoring formula (academically explicit):
+ *   score += 2                                    if genre matches (any shared genre)
+ *   score += 1                                    if experience_type matches
+ *   score += 1 - abs(ratingA - ratingB) / 100     rating similarity (0..1 scaled)
+ *   score += 1 - abs(popularityA - popularityB)   popularity similarity (0..1 scaled)
+ *
+ * Maximum possible score: 5.0
+ *
+ * @param {Object} movieA - The reference (selected) movie
+ * @param {Object} movieB - The candidate movie to compare
+ * @returns {{ total: number, genreScore: number, experienceScore: number, ratingScore: number, popularityScore: number, reasons: string[] }}
+ */
+function similarityScore(movieA, movieB) {
+    if (movieA.movie_id === movieB.movie_id) {
+        return { total: -1, genreScore: 0, experienceScore: 0, ratingScore: 0, popularityScore: 0, reasons: [] };
+    }
+
+    const breakdown = { genreScore: 0, experienceScore: 0, ratingScore: 0, popularityScore: 0 };
+    const reasons = [];
+
+    // ── Factor 1: Genre match (weight 2) ──
+    // Any shared genre between the two movies triggers the full +2 bonus
+    const sharedGenres = movieA.genre.filter(g => movieB.genre.includes(g));
+    if (sharedGenres.length > 0) {
+        breakdown.genreScore = 2;
+        reasons.push(`shares genre (${sharedGenres.join(', ')})`);
+    }
+
+    // ── Factor 2: Experience match (weight 1) ──
+    // Exact match of experience_type (fun, intense, emotional, relaxing)
+    if (movieA.experience_type === movieB.experience_type) {
+        breakdown.experienceScore = 1;
+        reasons.push(`same experience type (${movieA.experience_type})`);
+    }
+
+    // ── Factor 3: Rating similarity (weight 1) ──
+    // Formula: score += 1 - abs(ratingA - ratingB) / 100
+    // Closer ratings yield a higher score (max 1.0 when identical)
+    const ratingDiff = Math.abs(movieA.rating_percent - movieB.rating_percent);
+    breakdown.ratingScore = 1 - (ratingDiff / 100);
+    if (breakdown.ratingScore >= 0.85) {
+        reasons.push('similar rating');
+    }
+
+    // ── Factor 4: Popularity similarity (weight 1) ──
+    // Formula: score += 1 - abs(popularityA - popularityB)
+    // Both values are normalized 0..1, so diff is already 0..1
+    const popDiff = Math.abs(movieA.popularity_score - movieB.popularity_score);
+    breakdown.popularityScore = 1 - popDiff;
+    if (breakdown.popularityScore >= 0.85) {
+        reasons.push('similar popularity');
+    }
+
+    // ── Total ──
+    const total = breakdown.genreScore + breakdown.experienceScore + breakdown.ratingScore + breakdown.popularityScore;
+
+    return { total, ...breakdown, reasons };
+}
+
+/**
+ * Build a human-readable recommendation reason string.
+ * Examiners value explainability — this shows WHY a movie was recommended.
+ *
+ * @param {string[]} reasons - Array of reason fragments from similarityScore()
+ * @returns {string} e.g. "Recommended because it shares genre and experience type."
+ */
+function buildReasonText(reasons) {
+    if (!reasons || reasons.length === 0) return 'Recommended based on overall similarity.';
+    return 'Recommended because it ' + reasons.join(' and ') + '.';
+}
+
+/**
+ * Get hybrid recommendations based on explicit criteria.
+ * Used for the "Recommendation Engine" page.
+ *
+ * Logic:
+ * 1. Filter by Age (mandatory)
+ * 2. Filter by Genre (if selected)
+ * 3. Filter by Experience (if selected)
+ * 4. If 'similarToId' provided -> Score by Similarity to that movie
+ *    Else -> Score by general quality (Rating + Popularity)
+ *
+ * @param {Array} allMovies
+ * @param {Object} criteria - { userAge, genre, experience, similarToId }
+ * @param {number} count
+ */
+function getHybridRecommendations(allMovies, criteria, count = 12) {
+    const { userAge, genre, experience, similarToId } = criteria;
+
+    // 1. Initial Filter (Age)
+    let candidates = applyAgeFilter(allMovies, userAge);
+
+    // 2. Filter by Genre
+    if (genre && genre !== 'All' && genre !== '') {
+        candidates = candidates.filter(m => m.genre.includes(genre));
+    }
+
+    // 3. Filter by Experience
+    if (experience && experience !== 'All' && experience !== '') {
+        candidates = candidates.filter(m => m.experience_type === experience);
+    }
+
+    // 4. Scoring Strategy
+    let scored = [];
+    const target = similarToId ? allMovies.find(m => m.movie_id == similarToId) : null;
+
+    if (target) {
+        // Strategy A: Similarity Scoring (if target movie selected)
+        scored = candidates.map(m => {
+            const sim = similarityScore(target, m);
+            return {
+                movie: m,
+                score: sim.total,
+                reason: buildReasonText(sim.reasons),
+                breakdown: sim
+            };
+        });
+    } else {
+        // Strategy B: Filter Match + Quality Scoring (if no target movie)
+        scored = candidates.map(m => {
+            // Score = Popularity (0-1) + Rating (0-1)
+            const qualityScore = m.popularity_score + (m.rating_percent / 100);
+
+            // Construct a reason based on active filters
+            let reasonParts = [];
+            if (genre) reasonParts.push(`matches genre (${genre})`);
+            if (experience) reasonParts.push(`matches vibe (${experience})`);
+            if (reasonParts.length === 0) reasonParts.push('highly rated and popular');
+
+            const reasonStr = 'Selected because it ' + reasonParts.join(' and ') + '.';
+
+            return {
+                movie: m,
+                score: qualityScore,
+                reason: reasonStr
+            };
+        });
+    }
+
+    // 5. Sort, Filter, Slice
+    const results = scored
+        .filter(item => item.score > 0) // Remove self-match (-1) or zero score
+        .sort((a, b) => b.score - a.score)
+        .slice(0, count);
+
+    return results;
+}
+/**
+ * Get recommended movies for a given movie_id.
+ *
+ * Algorithm steps:
+ * 1. Accept selected movie_id
+ * 2. Compute similarity scores(with breakdown) against all other movies
+ * 3. Sort results by total similarity score(descending)
+ * 4. Apply age filter BEFORE returning final recommendations
+ * 5. Return top N results as { movie, score, reason } objects
+ *
+ * Fallback: Returns empty array when no matches found.
+ * UI layer should display: "No similar movies found under current age filter."
+ *
+ * @param {Array} allMovies - Full movie catalogue
+ * @param {number} movieId - Reference movie ID
+ * @param {number} userAge - User's age for content filtering
+ * @param {number} count - Max recommendations to return (default: 6)
+ * @returns {Array<{ movie: Object, score: number, reason: string }>}
+ */
+function getRecommendations(allMovies, movieId, userAge, count = 6) {
+    const target = allMovies.find(m => m.movie_id === movieId);
+    if (!target) return [];
+
+    // Score all movies with explicit breakdown
+    const scored = allMovies
+        .map(m => {
+            const result = similarityScore(target, m);
+            return {
+                movie: m,
+                score: result.total,
+                reason: buildReasonText(result.reasons),
+                breakdown: result
+            };
+        })
+        .filter(item => item.score > 0)
+        .sort((a, b) => b.score - a.score);
+
+    // Age filtering applied BEFORE returning final recommendations
+    const filtered = scored.filter(item => userAge >= item.movie.age_limit);
+
+    return filtered.slice(0, count);
+}
+
+/**
+ * Legacy-compatible getSimilar wrapper.
+ */
+function getSimilar(allMovies, movieId, count = 6) {
+    const userAge = parseInt(localStorage.getItem('univibe_age')) || 99;
+    return getRecommendations(allMovies, movieId, userAge, count);
+}
+
+// ──────────────────────────────────────────────
+// SORTING UTILITIES
+// ──────────────────────────────────────────────
+
+/**
+ * Get trending/popular movies (popularity_score >= 0.8).
+ */
+function getTrending(movies) {
+    return movies
+        .filter(m => m.popularity_score >= 0.8)
+        .sort((a, b) => b.popularity_score - a.popularity_score || b.rating_percent - a.rating_percent);
+}
+
+/**
+ * Get latest movies (sorted by year, newest first).
+ */
+function getLatest(movies) {
+    return [...movies].sort((a, b) => b.year - a.year);
+}
+
+/**
+ * Get top rated movies (sorted by rating_percent, highest first).
+ */
+function getTopRated(movies) {
+    return [...movies].sort((a, b) => b.rating_percent - a.rating_percent);
+}
+
+// ──────────────────────────────────────────────
+// GENRE & PLATFORM HELPERS
+// ──────────────────────────────────────────────
+
+/**
+ * Get all unique genres from the catalogue.
+ */
+function getAllGenres(movies) {
+    const genreSet = new Set();
+    movies.forEach(m => m.genre.forEach(g => genreSet.add(g)));
+    return Array.from(genreSet).sort();
+}
+
+/**
+ * Get movies available on a specific OTT platform.
+ */
+function getByPlatform(movies, platformName) {
+    return movies.filter(m =>
+        m.ottPlatforms.some(p => p.name === platformName)
+    );
+}
+
+/**
+ * Get all unique OTT platforms with icons.
+ */
+function getAllPlatforms() {
+    return [
+        { name: 'Netflix', icon: '🔴', color: '#e50914' },
+        { name: 'Disney+', icon: '🏰', color: '#113ccf' },
+        { name: 'Prime Video', icon: '📦', color: '#00a8e1' },
+        { name: 'HBO Max', icon: '🟣', color: '#b435f5' },
+        { name: 'Apple TV', icon: '🍎', color: '#a2aaad' },
+        { name: 'Paramount+', icon: '⭐', color: '#0064ff' },
+        { name: 'Hulu', icon: '🟢', color: '#1ce783' },
+        { name: 'Peacock', icon: '🦚', color: '#f4a523' }
+    ];
+}

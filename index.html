@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UniVibe — AI Movie Discovery & ML Recommendations</title>
+  <meta name="description"
+    content="Discover movies that match your vibe. Powered by a Reinforcement Learning engine that learns your taste — then stream on your favourite platform." />
+
+  <!-- Favicon (inline SVG) -->
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>" />
+
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="css/style.css" />
+
+  <!-- Fade-out keyframe for age gate removal -->
+  <style>
+    @keyframes fadeOut {
+      from {
+        opacity: 1;
+      }
+
+      to {
+        opacity: 0;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- Navbar -->
+  <nav class="navbar" id="navbar">
+    <div class="navbar-inner">
+      <a class="navbar-brand" href="#/">
+        <div class="logo-icon">U</div>
+        <div class="logo-text">UniVibe</div>
+      </a>
+      <div class="navbar-links" id="nav-links">
+        <a class="nav-link" href="#/" data-route="/">Home</a>
+        <a class="nav-link" href="#/movies" data-route="/movies">Discover</a>
+        <a class="nav-link" href="#/all" data-route="/all">Library</a>
+        <button class="nav-age-badge" id="nav-age-badge" onclick="resetAge()" title="Click to reset age">
+          👤 Set Age
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main App Container -->
+  <main id="app">
+    <!-- Pages render here -->
+  </main>
+
+  <!-- Scripts (order matters: data → API → logic → components → auth → router → pages) -->
+  <script src="data/movieData.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/recommendationEngine.js"></script>
+  <script src="js/components.js"></script>
+  <script src="js/router.js"></script>
+  <script src="js/pages/authUI.js"></script>
+  <script src="js/pages/dashboard.js"></script>
+  <script src="js/pages/home.js"></script>
+  <script src="js/pages/catalogue.js"></script>
+  <script src="js/pages/movieList.js"></script>
+  <script src="js/pages/detail.js"></script>
+  <script src="js/pages/platform.js"></script>
+  <script src="js/pages/ageGate.js"></script>
+
+  <script>
+    // ——————————————————————————
+    // UniVibe — App Initialisation
+    // ——————————————————————————
+
+    (function () {
+      const app = document.getElementById('app');
+
+      // Helper: render a page and add footer
+      function renderPage(html) {
+        app.innerHTML = html + renderFooter();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        updateActiveNav();
+      }
+
+      // Register routes
+      Router.on('/', function () {
+        renderPage(renderHome());
+        // Trigger recommendation loading after render
+        const userAge = parseInt(localStorage.getItem('univibe_age')) || 99;
+        const safeMovies = applyAgeFilter(MOVIES, userAge);
+        const trending = getTrending(safeMovies);
+        const featured = trending.length > 0
+          ? trending[Math.floor(Math.random() * Math.min(trending.length, 5))]
+          : safeMovies[0];
+        if (featured) {
+          setTimeout(() => showHomeRecommendations(featured.movie_id), 0);
+        }
+      });
+
+      Router.on('/movies', function () {
+        renderPage(renderCatalogue());
+        // Apply pre-set filters after DOM is ready
+        setTimeout(applyCatalogueFilters, 0);
+      });
+
+      Router.on('/all', function () {
+        renderPage(renderMovieList());
+      });
+
+      // Filtered view (Latest, Popular, etc.)
+      Router.on('/section/:filter', function (params) {
+        renderPage(renderMovieList(params));
+      });
+
+      Router.on('/movie/:id', function (params) {
+        renderPage(renderDetail(params));
+        // Animate rating bar and load recommendations after render
+        setTimeout(animateRatingBar, 0);
+        setTimeout(() => showDetailRecommendations(parseInt(params.id)), 0);
+        // Track view & load existing rating
+        const movieId = parseInt(params.id);
+        const movie = MOVIES.find(m => m.movie_id === movieId);
+        setTimeout(() => {
+          trackMovieView(movieId, movie);
+          loadExistingRating(movieId);
+        }, 100);
+      });
+
+      Router.on('/platform/:name', function (params) {
+        renderPage(renderPlatform(params));
+      });
+
+      // Profile route
+      Router.on('/profile', function () {
+        renderPage(renderProfile());
+        setTimeout(loadProfileData, 100);
+      });
+
+      // ML Intelligence Dashboard
+      Router.on('/dashboard', function () {
+        renderPage(renderDashboard());
+        setTimeout(loadDashboardData, 100);
+      });
+
+      // Start router
+      Router.init();
+
+      // Show age gate on first visit (only if not logged in)
+      if (!API.isLoggedIn()) {
+        showAgeGate();
+      }
+
+      // Update nav age badge on load
+      updateNavAgeBadge();
+
+      // Update auth UI on load
+      setTimeout(updateAuthUI, 0);
+
+      // Listen for auth events
+      window.addEventListener('univibe:logout', () => {
+        updateAuthUI();
+        Router.resolve();
+      });
+
+      window.addEventListener('univibe:auth-expired', () => {
+        showToast('Session expired. Please sign in again.', 'error');
+        updateAuthUI();
+      });
+
+      // Highlight active nav link
+      function updateActiveNav() {
+        const hash = window.location.hash.slice(1) || '/';
+        document.querySelectorAll('.nav-link').forEach(link => {
+          const route = link.dataset.route;
+          if (route === hash || (route !== '/' && hash.startsWith(route))) {
+            link.classList.add('active');
+          } else {
+            link.classList.remove('active');
+          }
+        });
+      }
+
+      // Listen for hash changes to update nav
+      window.addEventListener('hashchange', updateActiveNav);
+    })();
+  </script>
+
+</body>
+
+</html>
